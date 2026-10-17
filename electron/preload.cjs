@@ -4,6 +4,15 @@ contextBridge.exposeInMainWorld("airspanDesktop", {
   getPairingOrigin: () =>
     ipcRenderer.invoke("airspan:get-pairing-origin"),
 
+  getCaptureSources: () =>
+    ipcRenderer.invoke("airspan:get-capture-sources"),
+
+  selectCaptureSource: (sourceId) =>
+    ipcRenderer.invoke(
+      "airspan:select-capture-source",
+      sourceId,
+    ),
+
   getAirPlayDevices: () =>
     ipcRenderer.invoke("airspan:get-airplay-devices"),
 

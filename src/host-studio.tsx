@@ -5,14 +5,17 @@ import {
   useState,
 } from "react";
 import {
+  AppWindow,
   Check,
   ChevronRight,
   CircleAlert,
   Copy,
   FileArchive,
   Link2,
+  Monitor,
   MonitorUp,
   Radio,
+  RefreshCw,
   ShieldCheck,
   Sparkles,
   Tv,
@@ -79,6 +82,14 @@ type DiagnosticsExportResult = {
   bytes?: number;
   eventCount?: number;
 };
+type CaptureSourceKind = "screen" | "window";
+type CaptureSource = {
+  id: string;
+  name: string;
+  type: CaptureSourceKind;
+  thumbnail: string;
+  displayId: string | null;
+};
 export function QrPanel({ value }: { value: string }) {
   const [qrSrc, setQrSrc] = useState<string>("");
 
@@ -124,12 +135,13 @@ export function QrPanel({ value }: { value: string }) {
   );
 }
 
-export function Button({ children, onClick, size, className = "", variant }: any) {
+export function Button({ children, onClick, size, className = "", variant, disabled }: any) {
   const isDanger = variant === "danger";
   return (
     <button
       type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`button ${isDanger ? "button-danger" : "button-primary"} ${size === "lg" ? "button-large" : ""} ${className}`}
     >
       {children}
@@ -1603,6 +1615,24 @@ export function HostStudio() {
   const [code, setCode] = useState<string | null>(null);
   const [quality, setQuality] = useState<QualityId>("sharp");
   const [audio, setAudio] = useState(true);
+  const [captureSources, setCaptureSources] =
+    useState<CaptureSource[]>([]);
+  const [captureSourceKind, setCaptureSourceKind] =
+    useState<CaptureSourceKind>("screen");
+  const [selectedCaptureSourceId, setSelectedCaptureSourceId] =
+    useState<string | null>(null);
+  const [activeCaptureSource, setActiveCaptureSource] =
+    useState<CaptureSource | null>(null);
+  const [showCaptureSourcePicker, setShowCaptureSourcePicker] =
+    useState(false);
+  const [captureSourcesLoading, setCaptureSourcesLoading] =
+    useState(false);
+  const [captureSourcesError, setCaptureSourcesError] =
+    useState<string | null>(null);
+  const [isStartingShare, setIsStartingShare] =
+    useState(false);
+  const capturePickerRef =
+    useRef<HTMLDivElement | null>(null);
   const [sharing, setSharing] = useState(false);
   const [preview, setPreview] = useState<MediaStream | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -1667,6 +1697,70 @@ export function HostStudio() {
       null;
   };
 }, []);
+  useEffect(() => {
+    if (!showCaptureSourcePicker) {
+      return;
+    }
+
+    const handlePickerKeyDown = (
+      event: KeyboardEvent,
+    ) => {
+      if (
+        event.key === "Escape" &&
+        !isStartingShare
+      ) {
+        setShowCaptureSourcePicker(false);
+        return;
+      }
+
+      if (
+        event.key === "Tab" &&
+        capturePickerRef.current
+      ) {
+        const focusable =
+          capturePickerRef.current.querySelectorAll<HTMLElement>(
+            "button:not(:disabled), [href], input:not(:disabled), [tabindex]:not([tabindex='-1'])",
+          );
+        const first = focusable[0];
+        const last =
+          focusable[focusable.length - 1];
+
+        if (!first || !last) {
+          event.preventDefault();
+          return;
+        }
+
+        if (
+          event.shiftKey &&
+          document.activeElement === first
+        ) {
+          event.preventDefault();
+          last.focus();
+        } else if (
+          !event.shiftKey &&
+          document.activeElement === last
+        ) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+    };
+
+    window.addEventListener(
+      "keydown",
+      handlePickerKeyDown,
+    );
+
+    return () => {
+      window.removeEventListener(
+        "keydown",
+        handlePickerKeyDown,
+      );
+    };
+  }, [
+    showCaptureSourcePicker,
+    isStartingShare,
+  ]);
   useEffect(() => {
     airPlayPinValueRef.current =
       airPlayPin;
@@ -2381,11 +2475,118 @@ useEffect(() => {
     (p) => p.connectionState === "connected" && p.name === "display",
   );
 
-  async function startShare() {
+  async function loadCaptureSources() {
+    const bridge = window.airspanDesktop;
+
+    if (!bridge?.getCaptureSources) {
+      throw new Error(
+        "Desktop source selection is unavailable.",
+      );
+    }
+
+    setCaptureSourcesLoading(true);
+    setCaptureSourcesError(null);
+
+    try {
+      const sources =
+        await bridge.getCaptureSources();
+
+      setCaptureSources(sources);
+      setSelectedCaptureSourceId(
+        (currentSourceId) =>
+          sources.some(
+            (source) =>
+              source.id === currentSourceId,
+          )
+            ? currentSourceId
+            : null,
+      );
+      setCaptureSourceKind(
+        (currentKind) =>
+          sources.some(
+            (source) =>
+              source.type === currentKind,
+          )
+            ? currentKind
+            : sources.some(
+                  (source) =>
+                    source.type === "screen",
+                )
+              ? "screen"
+              : "window",
+      );
+    } catch (captureError) {
+      console.error(
+        "[AirSpan] Could not list capture sources:",
+        captureError,
+      );
+      setCaptureSources([]);
+      setCaptureSourcesError(
+        "AirSpan could not read the available displays and windows. Try refreshing the list.",
+      );
+    } finally {
+      setCaptureSourcesLoading(false);
+    }
+  }
+
+  async function openCaptureSourcePicker() {
+    setError(null);
+
+    if (
+      !window.airspanDesktop
+        ?.getCaptureSources
+    ) {
+      await startShare();
+      return;
+    }
+
+    setShowCaptureSourcePicker(true);
+    await loadCaptureSources();
+  }
+
+  async function shareSelectedCaptureSource() {
+    const source = captureSources.find(
+      (candidate) =>
+        candidate.id ===
+        selectedCaptureSourceId,
+    );
+
+    if (!source) {
+      return;
+    }
+
+    const started =
+      await startShare(source);
+
+    if (started) {
+      setShowCaptureSourcePicker(false);
+    }
+  }
+
+  async function startShare(
+    captureSource: CaptureSource | null = null,
+  ) {
   setError(null);
+  setCaptureSourcesError(null);
+  setIsStartingShare(true);
+  let stream: MediaStream | null = null;
 
   try {
-    const stream = await navigator.mediaDevices.getDisplayMedia({
+    if (captureSource) {
+      const selection =
+        await window.airspanDesktop
+          ?.selectCaptureSource?.(
+            captureSource.id,
+          );
+
+      if (!selection?.ok) {
+        throw new Error(
+          "The selected display or window is no longer available. Refresh the source list and choose it again.",
+        );
+      }
+    }
+
+    stream = await navigator.mediaDevices.getDisplayMedia({
   video: true,
   audio,
 });
@@ -2468,6 +2669,7 @@ if (video) {
 
     setSharing(false);
     setPreview(null);
+    setActiveCaptureSource(null);
   },
 );
 }
@@ -2475,27 +2677,50 @@ if (video) {
     setPreview(stream);
     await session.share(stream, quality);
     setSharing(true);
+    setActiveCaptureSource(
+      captureSource || {
+        id: "browser-picker",
+        name:
+          video?.label ||
+          "Shared screen",
+        type: "screen",
+        thumbnail: "",
+        displayId: null,
+      },
+    );
+    return true;
   } catch (err) {
     console.error("[AirSpan] Screen capture failed:", err);
     stopAirPlayMedia();
+    stream
+      ?.getTracks()
+      .forEach((track) => {
+        track.stop();
+      });
+    setPreview(null);
+    setSharing(false);
+    setActiveCaptureSource(null);
 
     const name = err instanceof Error ? err.name : "";
 
-    if (name === "NotAllowedError") {
-      setError("Screen sharing was blocked.");
-    } else if (name === "NotFoundError") {
-      setError("No screen or window was available to capture.");
-    } else if (name === "NotSupportedError") {
-      setError(
-        "Screen capture is not supported by this Electron configuration."
-      );
-    } else {
-      setError(
-        err instanceof Error
-          ? `Could not start capture: ${err.message}`
-          : "Could not start capture."
-      );
+    const message =
+      name === "NotAllowedError"
+        ? "Screen sharing was blocked."
+        : name === "NotFoundError"
+          ? "No screen or window was available to capture."
+          : name === "NotSupportedError"
+            ? "Screen capture is not supported by this Electron configuration."
+            : err instanceof Error
+              ? `Could not start capture: ${err.message}`
+              : "Could not start capture.";
+
+    setError(message);
+    if (captureSource) {
+      setCaptureSourcesError(message);
     }
+    return false;
+  } finally {
+    setIsStartingShare(false);
   }
 }
 
@@ -2513,6 +2738,7 @@ if (video) {
 
   setPreview(null);
   setSharing(false);
+  setActiveCaptureSource(null);
 }
 
   async function changeQuality(id: QualityId) {
@@ -2555,6 +2781,26 @@ if (video) {
         device.id ===
         airPlayConnection.deviceId,
     );
+  const displayCaptureSources =
+    captureSources.filter(
+      (source) =>
+        source.type === "screen",
+    );
+  const windowCaptureSources =
+    captureSources.filter(
+      (source) =>
+        source.type === "window",
+    );
+  const visibleCaptureSources =
+    captureSourceKind === "screen"
+      ? displayCaptureSources
+      : windowCaptureSources;
+  const selectedCaptureSource =
+    captureSources.find(
+      (source) =>
+        source.id ===
+        selectedCaptureSourceId,
+    ) || null;
   const airPlayStateLabel =
     airPlayConnection.status.charAt(0).toUpperCase() +
     airPlayConnection.status.slice(1);
@@ -2608,7 +2854,7 @@ if (video) {
             </span>
             <span>
               <strong>Share</strong>
-              <small>Select your screen</small>
+              <small>Select desktop or window</small>
             </span>
           </div>
           <div className={`sidebar-step ${sharing ? "is-current" : ""}`}>
@@ -2687,7 +2933,7 @@ if (video) {
           <div className="panel-heading">
             <div>
               <p className="eyebrow">Screen stream</p>
-              <h2>{sharing ? "Your screen is live" : "Share this screen"}</h2>
+              <h2>{sharing ? "Your screen is live" : "Share a display or window"}</h2>
               <p>
                 {sharing
                   ? `Sending video${audio ? " and system audio" : ""} to ${airPlayConnection.name || "your connected display"}.`
@@ -2738,6 +2984,17 @@ if (video) {
                 </>
               )}
             </div>
+
+            {activeCaptureSource && (
+              <div className="preview-source">
+                {activeCaptureSource.type === "screen" ? (
+                  <Monitor size={13} />
+                ) : (
+                  <AppWindow size={13} />
+                )}
+                <span>{activeCaptureSource.name}</span>
+              </div>
+            )}
           </div>
 
           <div className="stream-toolbar">
@@ -2792,9 +3049,15 @@ if (video) {
                 Stop sharing
               </Button>
             ) : (
-              <Button onClick={startShare} size="lg">
+              <Button
+                onClick={() => {
+                  void openCaptureSourcePicker();
+                }}
+                size="lg"
+                disabled={isStartingShare}
+              >
                 <MonitorUp size={17} />
-                Share screen
+                {isStartingShare ? "Starting share…" : "Choose source"}
               </Button>
             )}
           </div>
@@ -3068,6 +3331,256 @@ if (video) {
           </section>
         </aside>
       </main>
+
+      {showCaptureSourcePicker && (
+        <div
+          className="pairing-backdrop capture-picker-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="capture-picker-title"
+          aria-describedby="capture-picker-description"
+          onMouseDown={(event) => {
+            if (
+              event.target ===
+                event.currentTarget &&
+              !isStartingShare
+            ) {
+              setShowCaptureSourcePicker(false);
+            }
+          }}
+        >
+          <div
+            ref={capturePickerRef}
+            className="capture-picker-dialog"
+            onMouseDown={(event) => {
+              event.stopPropagation();
+            }}
+          >
+            <div className="capture-picker-heading">
+              <div>
+                <p className="eyebrow">Share source</p>
+                <h2 id="capture-picker-title">
+                  Choose what to share
+                </h2>
+                <p id="capture-picker-description">
+                  Select an entire display or one application window.
+                </p>
+              </div>
+              <button
+                type="button"
+                className="capture-picker-close"
+                aria-label="Close source picker"
+                disabled={isStartingShare}
+                onClick={() => {
+                  setShowCaptureSourcePicker(false);
+                }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="capture-picker-controls">
+              <div
+                className="capture-picker-tabs"
+                role="tablist"
+                aria-label="Source type"
+              >
+                <button
+                  id="capture-tab-displays"
+                  type="button"
+                  role="tab"
+                  aria-selected={captureSourceKind === "screen"}
+                  aria-controls="capture-sources-panel"
+                  className={captureSourceKind === "screen" ? "is-active" : ""}
+                  autoFocus={captureSourceKind === "screen"}
+                  onClick={() => {
+                    setCaptureSourceKind("screen");
+                    setSelectedCaptureSourceId(
+                      (sourceId) =>
+                        captureSources.find(
+                          (source) =>
+                            source.id === sourceId,
+                        )?.type === "screen"
+                          ? sourceId
+                          : null,
+                    );
+                  }}
+                >
+                  <Monitor size={15} />
+                  Displays
+                  <span>{displayCaptureSources.length}</span>
+                </button>
+                <button
+                  id="capture-tab-windows"
+                  type="button"
+                  role="tab"
+                  aria-selected={captureSourceKind === "window"}
+                  aria-controls="capture-sources-panel"
+                  className={captureSourceKind === "window" ? "is-active" : ""}
+                  autoFocus={captureSourceKind === "window"}
+                  onClick={() => {
+                    setCaptureSourceKind("window");
+                    setSelectedCaptureSourceId(
+                      (sourceId) =>
+                        captureSources.find(
+                          (source) =>
+                            source.id === sourceId,
+                        )?.type === "window"
+                          ? sourceId
+                          : null,
+                    );
+                  }}
+                >
+                  <AppWindow size={15} />
+                  Windows
+                  <span>{windowCaptureSources.length}</span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                className="capture-refresh-button"
+                disabled={captureSourcesLoading || isStartingShare}
+                onClick={() => {
+                  void loadCaptureSources();
+                }}
+              >
+                <RefreshCw size={14} />
+                Refresh
+              </button>
+            </div>
+
+            <div
+              id="capture-sources-panel"
+              className="capture-source-area"
+              role="tabpanel"
+              aria-labelledby={
+                captureSourceKind === "screen"
+                  ? "capture-tab-displays"
+                  : "capture-tab-windows"
+              }
+              aria-live="polite"
+              aria-busy={captureSourcesLoading}
+            >
+              {captureSourcesLoading ? (
+                <div className="capture-source-grid" aria-label="Loading share sources">
+                  {Array.from({ length: 4 }).map((_, index) => (
+                    <div
+                      className="capture-source-skeleton"
+                      key={index}
+                      aria-hidden="true"
+                    >
+                      <span />
+                      <i />
+                    </div>
+                  ))}
+                </div>
+              ) : visibleCaptureSources.length ? (
+                <div className="capture-source-grid">
+                  {visibleCaptureSources.map((source) => {
+                    const isSelected =
+                      selectedCaptureSourceId === source.id;
+
+                    return (
+                      <button
+                        type="button"
+                        className={`capture-source-card ${isSelected ? "is-selected" : ""}`}
+                        key={source.id}
+                        aria-pressed={isSelected}
+                        onClick={() => {
+                          setSelectedCaptureSourceId(source.id);
+                          setCaptureSourcesError(null);
+                        }}
+                      >
+                        <span className="capture-source-preview">
+                          {source.thumbnail ? (
+                            <img
+                              src={source.thumbnail}
+                              alt=""
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <span className="capture-source-placeholder">
+                              {source.type === "screen" ? (
+                                <Monitor size={25} />
+                              ) : (
+                                <AppWindow size={25} />
+                              )}
+                            </span>
+                          )}
+                          {isSelected && (
+                            <span className="capture-source-check" aria-hidden="true">
+                              <Check size={13} />
+                            </span>
+                          )}
+                        </span>
+                        <span className="capture-source-copy">
+                          <strong title={source.name}>{source.name}</strong>
+                          <small>
+                            {source.type === "screen"
+                              ? "Entire display"
+                              : "Application window"}
+                          </small>
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="capture-source-empty">
+                  {captureSourceKind === "screen" ? (
+                    <Monitor size={25} />
+                  ) : (
+                    <AppWindow size={25} />
+                  )}
+                  <strong>
+                    No {captureSourceKind === "screen" ? "displays" : "windows"} found
+                  </strong>
+                  <span>
+                    Open the window you want to share, then refresh this list.
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {captureSourcesError && (
+              <div className="capture-picker-error" role="alert">
+                <CircleAlert size={15} />
+                <span>{captureSourcesError}</span>
+              </div>
+            )}
+
+            <div className="capture-picker-actions">
+              <span className="capture-selection-summary">
+                {selectedCaptureSource
+                  ? `Selected: ${selectedCaptureSource.name}`
+                  : "Select one source to continue"}
+              </span>
+              <button
+                type="button"
+                className="button button-ghost"
+                disabled={isStartingShare}
+                onClick={() => {
+                  setShowCaptureSourcePicker(false);
+                }}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="button button-primary"
+                disabled={!selectedCaptureSource || isStartingShare}
+                onClick={() => {
+                  void shareSelectedCaptureSource();
+                }}
+              >
+                <MonitorUp size={16} />
+                {isStartingShare ? "Starting share…" : "Share selected"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {(showAirPlayPin || airPlayConnection.status === "pairing") && (
         <div

@@ -7,6 +7,7 @@ import {
   desktopCapturer,
   session,
   safeStorage,
+  webContents,
 } from 'electron';
 import http from 'node:http';
 import net from "node:net";
@@ -56,6 +57,10 @@ import {
   createDiagnosticsArchive,
   makeDiagnosticsFilename,
 } from "./diagnostics.mjs";
+import {
+  findCaptureSource,
+  serializeCaptureSource,
+} from "./capture-sources.mjs";
 
 if (process.platform === "win32") {
   app.commandLine.appendSwitch(
@@ -1112,6 +1117,8 @@ const PRELOAD_PATH = app.isPackaged
 
 let server;
 let mainWindow;
+const pendingCaptureSources =
+  new Map();
 let airPlayBonjour = null;
 let airPlayBrowser = null;
 let pendingAirPlayDevice = null;
@@ -9095,6 +9102,7 @@ ipcMain.handle(
 await mainWindow.loadURL(`http://127.0.0.1:${PORT}/?desktop=1`);
 
 mainWindow.on('closed', () => {
+  pendingCaptureSources.clear();
   mainWindow = null;
 });
 }
@@ -9102,6 +9110,8 @@ app.whenReady().then(async () => {
   await migrateLegacyAirPlayPairings();
   startAirPlayDiscovery();
   ipcMain.removeHandler("airspan:get-pairing-origin");
+  ipcMain.removeHandler("airspan:get-capture-sources");
+  ipcMain.removeHandler("airspan:select-capture-source");
 
 ipcMain.handle(
   "airspan:get-pairing-origin",
@@ -9111,30 +9121,126 @@ ipcMain.handle(
   },
 );
 
+ipcMain.handle(
+  "airspan:get-capture-sources",
+  async () => {
+    const sources =
+      await desktopCapturer.getSources({
+        types: ["screen", "window"],
+        thumbnailSize: {
+          width: 360,
+          height: 203,
+        },
+      });
+
+    return sources.map(
+      serializeCaptureSource,
+    );
+  },
+);
+
+ipcMain.handle(
+  "airspan:select-capture-source",
+  async (event, sourceId) => {
+    if (
+      typeof sourceId !== "string" ||
+      sourceId.length > 512 ||
+      !/^(?:screen|window):/.test(sourceId)
+    ) {
+      return { ok: false };
+    }
+
+    const sources =
+      await desktopCapturer.getSources({
+        types: ["screen", "window"],
+        thumbnailSize: {
+          width: 0,
+          height: 0,
+        },
+      });
+
+    if (
+      !findCaptureSource(
+        sources,
+        sourceId,
+      )
+    ) {
+      return { ok: false };
+    }
+
+    pendingCaptureSources.set(
+      event.sender.id,
+      {
+        sourceId,
+        selectedAt: Date.now(),
+      },
+    );
+
+    return { ok: true };
+  },
+);
+
   session.defaultSession.setDisplayMediaRequestHandler(
-    async (_request, callback) => {
+    async (request, callback) => {
       try {
-        const sources = await desktopCapturer.getSources({
-          types: ['screen'],
-        });
+        const senderId =
+          webContents.fromFrame(
+            request.frame,
+          )?.id;
+        const pendingSelection =
+          pendingCaptureSources.get(senderId);
 
-        console.log(
-          '[AirSpan] screen sources:',
-          sources.map((source) => ({
-            id: source.id,
-            name: source.name,
-          })),
-        );
+        pendingCaptureSources.delete(senderId);
 
-        if (!sources.length) {
+        if (
+          !pendingSelection ||
+          Date.now() - pendingSelection.selectedAt > 30_000
+        ) {
+          console.warn(
+            "[AirSpan] Display capture was requested without a current source selection.",
+          );
           callback({});
           return;
         }
 
-        callback({
-          video: sources[0],
-          audio: "loopback",
+        const sources = await desktopCapturer.getSources({
+          types: ["screen", "window"],
+          thumbnailSize: {
+            width: 0,
+            height: 0,
+          },
         });
+
+        const selectedSource =
+          findCaptureSource(
+            sources,
+            pendingSelection.sourceId,
+          );
+
+        console.log(
+          "[AirSpan] selected capture source:",
+          selectedSource
+            ? {
+                id: selectedSource.id,
+                name: selectedSource.name,
+              }
+            : pendingSelection.sourceId,
+        );
+
+        if (!selectedSource) {
+          callback({});
+          return;
+        }
+
+        const response = {
+          video: selectedSource,
+        };
+
+        if (request.audioRequested) {
+          response.audio = "loopback";
+        }
+
+        callback(response);
       } catch (error) {
         console.error(
           '[AirSpan] display capture failed:',
