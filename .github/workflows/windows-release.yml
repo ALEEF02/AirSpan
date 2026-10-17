@@ -1,0 +1,127 @@
+name: Build and release Windows apps
+
+on:
+  push:
+    tags:
+      - "*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build installer and portable app
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Set version from tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $tag = $env:RELEASE_TAG
+          $version = $tag -replace '^v(?=\d)', ''
+
+          if ($version -notmatch '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$') {
+            throw "Release tag '$tag' must be a semantic version such as v1.2.3 or 1.2.3."
+          }
+
+          npm version "$version" --no-git-tag-version --allow-same-version
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not set the package version to '$version'."
+          }
+
+          "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Check types
+        run: npm run typecheck
+
+      - name: Build Windows installer and portable app
+        run: npm run desktop:dist
+
+      - name: Locate release files
+        id: binaries
+        shell: pwsh
+        run: |
+          $installer = @(Get-ChildItem -Path dist -File -Filter "AirSpan Setup *.exe")
+          $portable = @(Get-ChildItem -Path dist -File -Filter "AirSpan-*-portable.exe")
+
+          if ($installer.Count -ne 1) {
+            throw "Expected one Windows installer in dist, but found $($installer.Count)."
+          }
+
+          if ($portable.Count -ne 1) {
+            throw "Expected one portable Windows app in dist, but found $($portable.Count)."
+          }
+
+          "installer=$($installer[0].FullName)" >> $env:GITHUB_OUTPUT
+          "portable=$($portable[0].FullName)" >> $env:GITHUB_OUTPUT
+
+      - name: Upload installer workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirSpan-${{ env.APP_VERSION }}-windows-installer
+          path: ${{ steps.binaries.outputs.installer }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload portable workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: AirSpan-${{ env.APP_VERSION }}-windows-portable
+          path: ${{ steps.binaries.outputs.portable }}
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Create GitHub release and upload files
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          INSTALLER_PATH: ${{ steps.binaries.outputs.installer }}
+          PORTABLE_PATH: ${{ steps.binaries.outputs.portable }}
+        run: |
+          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" *> $null
+
+          if ($LASTEXITCODE -ne 0) {
+            gh release create "$env:RELEASE_TAG" `
+              --repo "$env:GITHUB_REPOSITORY" `
+              --verify-tag `
+              --generate-notes `
+              --title "AirSpan $env:APP_VERSION"
+
+            if ($LASTEXITCODE -ne 0) {
+              throw "Could not create release '$env:RELEASE_TAG'."
+            }
+          }
+
+          gh release upload "$env:RELEASE_TAG" `
+            "$env:INSTALLER_PATH" `
+            "$env:PORTABLE_PATH" `
+            --repo "$env:GITHUB_REPOSITORY" `
+            --clobber
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Could not upload the Windows release files."
+          }
