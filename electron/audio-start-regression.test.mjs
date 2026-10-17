@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  advanceAirPlayRtpTimestampForGap,
   airPlayPtpNanoseconds,
   buildAirPlayAudioSyncPacket,
 } from "./airplay-audio-sync.mjs";
@@ -32,6 +33,19 @@ test("marks both initial and resumed audio packet boundaries", () => {
     mainSource,
     /audio\.packetsSent === 0 \|\| resumedAfterPause[\s\S]*?\? 0xe0[\s\S]*?: 0x60/,
   );
+});
+
+test("advances the RTP clock across a capture pause", () => {
+  const result = advanceAirPlayRtpTimestampForGap({
+    rtpTimestamp: 2951617174,
+    gapMs: 3010,
+    sampleRate: 44100,
+    samplesPerFrame: 352,
+  });
+
+  assert.equal(result.elapsedSamples, 132741);
+  assert.equal(result.skippedSamples, 132389);
+  assert.equal(result.rtpTimestamp, 2951749563);
 });
 
 test("encodes the negotiated PTP realtime latency window", () => {

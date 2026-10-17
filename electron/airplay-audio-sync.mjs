@@ -9,6 +9,41 @@ export function airPlayPtpNanoseconds(timestamp) {
   );
 }
 
+export function advanceAirPlayRtpTimestampForGap({
+  rtpTimestamp,
+  gapMs,
+  sampleRate,
+  samplesPerFrame,
+}) {
+  const timestamp = Number(rtpTimestamp) >>> 0;
+  const rate = Math.max(1, Number(sampleRate) || 0);
+  const frameSamples = Math.max(
+    1,
+    Number(samplesPerFrame) || 0,
+  );
+  const elapsedSamples = Math.max(
+    frameSamples,
+    Math.round(
+      Math.max(0, Number(gapMs) || 0) *
+        rate /
+        1000,
+    ),
+  );
+  // rtpTimestamp already points one frame beyond the last packet. Advance it
+  // only by the additional samples that elapsed while no packets were sent.
+  const skippedSamples = Math.max(
+    0,
+    elapsedSamples - frameSamples,
+  );
+
+  return {
+    rtpTimestamp:
+      (timestamp + skippedSamples) >>> 0,
+    elapsedSamples,
+    skippedSamples,
+  };
+}
+
 export function buildAirPlayAudioSyncPacket({
   timingProtocol,
   timelineID,

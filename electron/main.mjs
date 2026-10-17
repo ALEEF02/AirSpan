@@ -62,6 +62,7 @@ import {
   serializeCaptureSource,
 } from "./capture-sources.mjs";
 import {
+  advanceAirPlayRtpTimestampForGap,
   airPlayPtpNanoseconds,
   buildAirPlayAudioSyncPacket,
 } from "./airplay-audio-sync.mjs";
@@ -4254,15 +4255,31 @@ function sendAirPlayAudioPacket(controlChannel, pcm, captureTimestampUs) {
   }
 
   const alac = encodeAirPlayAlacVerbatimFrame(pcm);
-  const packetRtpTimestamp = audio.rtpTimestamp >>> 0;
+  let packetRtpTimestamp = audio.rtpTimestamp >>> 0;
   const now = Date.now();
-  // Stopping screen capture does not necessarily tear down the RTSP session.
-  // When capture resumes, the receiver needs a new RTP-to-clock mapping even
-  // though the negotiated audio sockets and sequence counters are unchanged.
-  const resumedAfterPause =
+  const gapMs =
     Number.isFinite(audio.lastPacketAt) &&
-    audio.lastPacketAt > 0 &&
-    now - audio.lastPacketAt > 750;
+    audio.lastPacketAt > 0
+      ? now - audio.lastPacketAt
+      : 0;
+  const resumedAfterPause =
+    gapMs > 750;
+  let skippedSamples = 0;
+
+  if (resumedAfterPause) {
+    // Keep the original RTP clock running across a capture pause. Reusing the
+    // pre-pause timestamp makes every resumed frame late by the full gap on
+    // receivers that retain the original PTP anchor.
+    const resumedTimeline =
+      advanceAirPlayRtpTimestampForGap({
+        rtpTimestamp: packetRtpTimestamp,
+        gapMs,
+        sampleRate: AIRPLAY_AUDIO_SAMPLE_RATE,
+        samplesPerFrame: AIRPLAY_AUDIO_SAMPLES_PER_FRAME,
+      });
+    packetRtpTimestamp = resumedTimeline.rtpTimestamp;
+    skippedSamples = resumedTimeline.skippedSamples;
+  }
 
   const header = Buffer.alloc(12);
   header[0] = 0x80;
@@ -4315,9 +4332,10 @@ function sendAirPlayAudioPacket(controlChannel, pcm, captureTimestampUs) {
       // first encrypted audio frame, and again after a stop/start gap.
       if (resumedAfterPause) {
         airPlayDiagnostic("audio-resume-sync", {
-          gapMs: now - audio.lastPacketAt,
+          gapMs,
           sequence: audio.sequence,
           rtpTimestamp: packetRtpTimestamp,
+          skippedSamples,
           timingProtocol: audio.timingProtocol || "PTP",
         });
       }
