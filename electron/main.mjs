@@ -61,6 +61,9 @@ import {
   findCaptureSource,
   serializeCaptureSource,
 } from "./capture-sources.mjs";
+import {
+  buildAirPlayAudioSyncPacket,
+} from "./airplay-audio-sync.mjs";
 
 if (process.platform === "win32") {
   app.commandLine.appendSwitch(
@@ -4130,13 +4133,6 @@ function encodeAirPlayAlacVerbatimFrame(pcm, frameSamples = AIRPLAY_AUDIO_SAMPLE
   return output;
 }
 
-function airPlayPtpNanoseconds(timestamp) {
-  const value = BigInt(timestamp || 0);
-  const seconds = value >> 32n;
-  const fraction = value & 0xffffffffn;
-  return seconds * 1000000000n + ((fraction * 1000000000n) >> 32n);
-}
-
 function sendAirPlayAudioSync(
   controlChannel,
   audio,
@@ -4197,36 +4193,22 @@ function sendAirPlayAudioSync(
           AIRPLAY_NTP_EPOCH_OFFSET_MS,
         )
       : clock.timestamp;
-  const packet = Buffer.alloc(hasPtpTimeline ? 28 : 20);
-  packet[0] = startBoundary || !audio.syncPackets ? 0x90 : 0x80;
-  packet[1] = hasPtpTimeline ? 0xd7 : 0xd4;
-  // The second word identifies the announce layout: 0x0007 for the legacy
-  // NTP form and 0x0006 for the native PTP form. The RTP sequence is carried
-  // separately in the audio data packets.
-  packet.writeUInt16BE(hasPtpTimeline ? 6 : 7, 2);
-
-  const syncRtpTimestamp =
-    (Number(rtpTimestamp >>> 0) - audio.latencySamples) >>> 0;
-  if (hasPtpTimeline) {
-    // Native PTP announces carry the current RTP position first, followed by
-    // the PTP wall-clock timestamp, then the rendering position (current RTP
-    // minus the negotiated lead) and the sender's PTP clock identity. Keeping
-    // these two RTP fields reversed makes Apple TV accept the session while
-    // never releasing the encrypted audio frames for playback.
-    packet.writeUInt32BE(Number(rtpTimestamp >>> 0), 4);
-    packet.writeBigUInt64BE(
-      airPlayPtpNanoseconds(syncTimestamp),
-      8,
-    );
-    packet.writeUInt32BE(syncRtpTimestamp, 16);
-    packet.writeBigUInt64BE(audio.timelineID, 20);
-  } else {
-    // Legacy NTP announces use the rendering position first and the current
-    // RTP position in the final word.
-    packet.writeUInt32BE(syncRtpTimestamp, 4);
-    packet.writeBigUInt64BE(syncTimestamp, 8);
-    packet.writeUInt32BE(Number(rtpTimestamp >>> 0), 16);
-  }
+  const {
+    packet,
+    packetRtpTimestamp,
+    firstRtpTimestamp,
+    secondRtpTimestamp,
+    streamLatencySamples,
+  } = buildAirPlayAudioSyncPacket({
+    timingProtocol: audio.timingProtocol,
+    timelineID: currentTimelineID,
+    timestamp: syncTimestamp,
+    rtpTimestamp,
+    latencyMinSamples: audio.latencySamples,
+    latencyMaxSamples: audio.latencyMaxSamples,
+    startBoundary,
+    hasSentSync: Boolean(audio.syncPackets),
+  });
 
   try {
     audio.controlSocket.send(
@@ -4237,6 +4219,20 @@ function sendAirPlayAudioSync(
     audio.lastSyncAt = now;
     audio.syncPackets = (audio.syncPackets || 0) + 1;
     audio.syncSequence = (audio.syncSequence + 1) & 0xffff;
+    if (startBoundary) {
+      airPlayDiagnostic("audio-sync-boundary", {
+        timingProtocol: audio.timingProtocol || "PTP",
+        packetRtpTimestamp,
+        firstRtpTimestamp,
+        secondRtpTimestamp,
+        streamLatencySamples,
+        latencyMinSamples: audio.latencySamples,
+        latencyMaxSamples: audio.latencyMaxSamples,
+        timelineID: hasPtpTimeline
+          ? currentTimelineID.toString()
+          : "0",
+      });
+    }
     return true;
   } catch (error) {
     console.error("[AirSpan] Could not send AirPlay audio sync:", error);
@@ -4818,6 +4814,7 @@ async function setupAirPlaySilentScreenAudio(
     remoteAddress,
     audioKey,
     latencySamples,
+    latencyMaxSamples,
     timingProtocol: audioTimingProtocol,
     timelineID:
       audioTimingProtocol === "PTP"
@@ -4921,6 +4918,7 @@ async function setupAirPlaySilentScreenAudio(
       latencyMs:
         AIRPLAY_AUDIO_LATENCY_MS,
       latencySamples,
+      latencyMaxSamples,
       initialSequence:
         audioSetup.sequence,
       initialRtpTimestamp:
