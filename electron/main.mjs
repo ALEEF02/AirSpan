@@ -62,6 +62,7 @@ import {
   serializeCaptureSource,
 } from "./capture-sources.mjs";
 import {
+  airPlayPtpNanoseconds,
   buildAirPlayAudioSyncPacket,
 } from "./airplay-audio-sync.mjs";
 

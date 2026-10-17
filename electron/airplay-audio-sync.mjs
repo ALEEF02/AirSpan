@@ -1,4 +1,4 @@
-function airPlayPtpNanoseconds(timestamp) {
+export function airPlayPtpNanoseconds(timestamp) {
   const value = BigInt(timestamp || 0);
   const seconds = value >> 32n;
   const fraction = value & 0xffffffffn;

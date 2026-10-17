@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  airPlayPtpNanoseconds,
   buildAirPlayAudioSyncPacket,
 } from "./airplay-audio-sync.mjs";
 
@@ -9,6 +10,17 @@ const mainSource = readFileSync(
   new URL("./main.mjs", import.meta.url),
   "utf8",
 );
+
+test("imports the PTP timestamp converter used by the timing transport", () => {
+  assert.match(
+    mainSource,
+    /import\s*\{[^}]*airPlayPtpNanoseconds[^}]*\}\s*from\s*["']\.\/airplay-audio-sync\.mjs["']/,
+  );
+  assert.equal(
+    airPlayPtpNanoseconds(1000n << 32n),
+    1000000000000n,
+  );
+});
 
 test("does not anchor audio before the first captured packet", () => {
   assert.equal(mainSource.includes("preAudioSyncTimer"), false);
