@@ -58,7 +58,7 @@ jobs:
         run: npm run typecheck
 
       - name: Build Windows installer and portable app
-        run: npm run desktop:dist
+        run: npm run desktop:dist -- --publish never
 
       - name: Locate release files
         id: binaries
